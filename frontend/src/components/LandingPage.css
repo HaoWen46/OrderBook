@@ -1,0 +1,109 @@
+/* -- GLOBAL RESET (fixes white border) --------------------- */
+html, body {
+  height: 100%;
+  margin: 0;              /* ← removes the default 8‑px body margin */
+}
+
+/* ----- Layout ----- */
+.lp-container {
+  position: relative;
+  min-height: 100vh;
+  width: 100%;            /* ensure full width */
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #0f4c75 0%, #1b6ca8 50%, #38a3d1 100%);
+  color: #eef6ff;
+  overflow: hidden;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* ----- Animated blob background ----- */
+.lp-blob {
+  position: absolute;
+  width: 500px;
+  aspect-ratio: 1;
+  background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.35) 0%, rgba(255,255,255,0.05) 60%);
+  filter: blur(90px);
+  border-radius: 50%;
+  animation: float 12s ease-in-out infinite alternate;
+}
+@keyframes float {
+  0%   { transform: translate(-40%, -30%) scale(0.9); }
+  100% { transform: translate(60%, 40%) scale(1.2);  }
+}
+
+/* ----- Center card ----- */
+.lp-card {
+  z-index: 2;
+  max-width: 36rem;
+  padding: 3rem 2.5rem;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 1.25rem;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+}
+
+.lp-title {
+  font-size: clamp(2rem, 4vw, 3rem);
+  font-weight: 800;
+  margin-bottom: 0.75rem;
+  line-height: 1.1;
+}
+
+.lp-sub {
+  font-size: 1.125rem;
+  font-weight: 300;
+  margin-bottom: 2rem;
+}
+
+/* ----- Buttons ----- */
+.lp-actions {
+  display: flex;
+  justify-content: center;
+  gap: 1.25rem;
+}
+
+.lp-btn {
+  display: inline-block;
+  min-width: 7.5rem;
+  padding: 0.75rem 1.5rem;
+  border-radius: 0.75rem;
+  font-size: 1rem;
+  font-weight: 600;
+  text-align: center;
+  color: #eef6ff;
+  background: rgba(255,255,255,0.15);
+  border: 1px solid rgba(255,255,255,0.25);
+  backdrop-filter: blur(6px);
+  transition: transform 0.2s, background 0.2s;
+}
+.lp-btn:hover {
+  transform: translateY(-3px);
+  background: rgba(255,255,255,0.25);
+}
+.lp-btn--primary {
+  background: #20b4ff;
+  border-color: #20b4ff;
+}
+.lp-btn--primary:hover {
+  background: #38c3ff;
+}
+
+/* ----- Footer ----- */
+.lp-footer {
+  position: absolute;
+  bottom: 1rem;
+  width: 100%;
+  text-align: center;
+  font-size: 0.875rem;
+  color: rgba(238,246,255,0.7);
+}
+
+/* ----- Small screens ----- */
+@media (max-width: 480px) {
+  .lp-card { padding: 2.25rem 1.5rem; }
+  .lp-sub  { font-size: 1rem;        }
+  .lp-actions { flex-direction: column; gap: 0.75rem; }
+}

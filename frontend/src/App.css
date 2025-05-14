@@ -1,0 +1,22 @@
+body {
+  font-family: Arial, sans-serif;
+  margin: 20px;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th, td {
+  border: 1px solid #ccc;
+  padding: 4px 8px;
+  text-align: right;
+}
+th {
+  background-color: #f9f9f9;
+}
+.price-up {
+  color: green;
+}
+.price-down {
+  color: red;
+}
