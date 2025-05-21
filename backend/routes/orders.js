@@ -184,7 +184,7 @@ router.post('/', verifyToken, async (req, res) => {
   try {
     // Fetch symbol details
     const [[symRow]] = await pool.query(
-      'SELECT symbol, strike, expiration, outstanding_shares, last_price FROM symbols WHERE id = ?',
+      'SELECT symbol, outstanding_shares, last_price FROM symbols WHERE id = ?',
       [symbol_id]
     );
     if (!symRow) {

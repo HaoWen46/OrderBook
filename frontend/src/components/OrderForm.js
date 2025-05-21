@@ -24,7 +24,7 @@ function OrderForm({ symbolId, token, onOrderPlaced }) {
     }
 
     // Determine which symbol (stock) to use for the order
-    let tradeSymbolId = symbolIdId;
+    let tradeSymbolId = symbolId;
     try {
       const res = await fetch('http://localhost:5000/api/orders', {
         method: 'POST',
