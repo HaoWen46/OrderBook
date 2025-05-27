@@ -131,24 +131,27 @@ router.post('/', verifyToken, async (req, res) => {
   symbol_id = parseInt(symbol_id, 10);
   quantity = parseInt(quantity, 10);
 
+  console.log(`[ORDER_DEBUG] Incoming order for user ${userId}: Symbol ${symbol_id}, Side ${side}, Price ${price}, Quantity ${quantity}, Type ${type}`);
+
   if (!symbol_id || !side || !quantity || isNaN(quantity) || quantity <= 0) {
+    console.log(`[ORDER_DEBUG] Invalid order parameters: symbol_id=${symbol_id}, side=${side}, quantity=${quantity}`);
     return res.status(400).json({ message: 'Missing or invalid order parameters' });
   }
   if (side !== 'buy' && side !== 'sell') {
+    console.log(`[ORDER_DEBUG] Invalid order side: ${side}`);
     return res.status(400).json({ message: 'Invalid order side' });
   }
   if (type === 'limit') {
-    // For limit orders, price must be provided and positive
     if (price === undefined || price === null || Number(price) <= 0) {
+      console.log(`[ORDER_DEBUG] Invalid price for limit order: ${price}`);
       return res.status(400).json({ message: 'Invalid price for limit order' });
     }
     price = Number(price);
   } else {
-    // For market orders, we don't require a price (will use market prices)
     price = null;
   }
 
-  // Maker‑maker cross prevention
+  // Maker‑maker cross prevention for limit orders
   if (type === 'limit') {
     if (side === 'buy') {
       const [[{ bestAsk }]] = await pool.query(
@@ -158,6 +161,7 @@ router.post('/', verifyToken, async (req, res) => {
         [symbol_id]
       );
       if (bestAsk !== null && price >= parseFloat(bestAsk)) {
+        console.log(`[ORDER_DEBUG] Limit buy price ${price} crosses best ask ${bestAsk}.`);
         return res.status(400).json({
           message:
             'Limit buy price must be **lower** than the current best ask; ' +
@@ -172,6 +176,7 @@ router.post('/', verifyToken, async (req, res) => {
         [symbol_id]
       );
       if (bestBid !== null && price <= parseFloat(bestBid)) {
+        console.log(`[ORDER_DEBUG] Limit sell price ${price} crosses best bid ${bestBid}.`);
         return res.status(400).json({
           message:
             'Limit sell price must be **higher** than the current best bid; ' +
@@ -182,22 +187,23 @@ router.post('/', verifyToken, async (req, res) => {
   }
 
   try {
-    // Fetch symbol details
     const [[symRow]] = await pool.query(
       'SELECT symbol, outstanding_shares, last_price FROM symbols WHERE id = ?',
       [symbol_id]
     );
     if (!symRow) {
+      console.log(`[ORDER_DEBUG] Symbol not found: ${symbol_id}`);
       return res.status(404).json({ message: 'Symbol not found' });
     }
     const totalShares = symRow.outstanding_shares;
 
-    // Fetch user's current cash balance and position for this symbol
     const [[userAccount]] = await pool.query(
-      'SELECT cash_balance, role FROM users WHERE id = ?',
+      'SELECT cash_balance FROM users WHERE id = ?',
       [userId]
     );
     const userCash = userAccount ? parseFloat(userAccount.cash_balance) : 0;
+    console.log(`[ORDER_DEBUG] User ${userId} cash balance fetched: ${userCash}.`);
+
     let userPos = 0;
     const [[posRow]] = await pool.query(
       'SELECT quantity FROM positions WHERE user_id = ? AND symbol_id = ?',
@@ -212,89 +218,69 @@ router.post('/', verifyToken, async (req, res) => {
       if (type === 'limit') {
         const totalCost = price * quantity;
         if (userCash < totalCost) {
+          console.log(`[ORDER_DEBUG] Insufficient funds for buy order. User cash: ${userCash}, required: ${totalCost}`);
           return res.status(400).json({ message: 'Insufficient funds for buy order' });
         }
       }
-      // For market buy, we'll check affordability while matching (see below)
     } else if (side === 'sell') {
-      // For sell orders, ensure the user is not selling more than they are allowed (no exceed minted shares)
-        // If stock, ensure quantity <= userPos + (available shares to borrow)
-        // i.e. cannot short more than outstanding shares
       if (quantity > userPos) {
         const shortQty = quantity - (userPos > 0 ? userPos : 0);
         if (shortQty > totalShares) {
+          console.log(`[ORDER_DEBUG] Sell order quantity ${quantity} exceeds available shares ${totalShares} in circulation for user ${userId}.`);
           return res.status(400).json({ message: 'Order exceeds available shares in circulation' });
-        }
-      }
-      if (quantity > userPos) {
-        // Short selling the difference
-        const shortQty = quantity - (userPos > 0 ? userPos : 0);
-        // If limit order, use limit price for max cost; if market, use last price as estimate
-        const shortPrice = (type === 'limit') ? price : (symRow.last_price !== null ? symRow.last_price : 0);
-        const maxCost = shortPrice * shortQty;
-        if (userCash < maxCost) {
-          return res.status(400).json({ message: 'Insufficient funds to short sell' });
         }
       }
     }
 
-    // Begin matching logic within a DB transaction
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
+      console.log(`[ORDER_DEBUG] Transaction begun for user ${userId}.`);
 
-      // Reserve funds or collateral if needed before placing the order
+      // Reserve funds for limit buy orders upfront
       if (side === 'buy' && type === 'limit') {
-        // Deduct full amount for limit buy upfront (will refund any difference later)
         const totalCost = price * quantity;
+        console.log(`[ORDER_DEBUG] LIMIT BUY: Deducting ${totalCost} from user ${userId} cash balance. Initial balance: ${userCash}.`);
         await conn.query(
           'UPDATE users SET cash_balance = cash_balance - ? WHERE id = ?',
           [totalCost, userId]
         );
-      }
-      if (side === 'sell' && type === 'limit') {
-        // If it's a short-sell (selling more than owned), reserve cash equal to short portion value
-        if (quantity > userPos) {
-          const shortQty = quantity - (userPos > 0 ? userPos : 0);
-          const collateral = price * shortQty;
-          if (collateral > 0) {
-            await conn.query(
-              'UPDATE users SET cash_balance = cash_balance - ? WHERE id = ?',
-              [collateral, userId]
-            );
-          }
-        }
+        console.log(`[ORDER_DEBUG] LIMIT BUY: Cash deduction query executed.`);
       }
 
       let newOrderId = null;
       let remainingQty = quantity;
-      const tradesExecuted = [];
+      // Store trade details for post-processing cash adjustments for self-trades
+      const tradesExecuted = []; 
 
       if (type === 'market') {
-        // --- Market Order Execution: Immediate matching without entering order book ---
-        // Lock relevant rows in the order book for matching
+        console.log(`[ORDER_DEBUG] Processing MARKET order for user ${userId}.`);
         const sideToHit = (side === 'buy') ? 'sell' : 'buy';
-        // For market orders, no specific price condition; take best available.
         const orderByClause = (side === 'buy') ? 'price ASC, id ASC' : 'price DESC, id ASC';
+        // Select maker order's price and quantity
         const [bookOrders] = await conn.query(
-          `SELECT * FROM orders 
-             WHERE symbol_id = ? AND side = ? AND status = 'OPEN'
-             ORDER BY ${orderByClause} 
-             FOR UPDATE`,
+          `SELECT id, user_id, price, quantity, side FROM orders 
+            WHERE symbol_id = ? 
+              AND side = ? 
+              AND status = 'OPEN'
+            ORDER BY ${orderByClause} 
+            FOR UPDATE`,
           [symbol_id, sideToHit]
         );
-        // Execute against the book
-        let cashAvailable = userCash;
-        for (const order of bookOrders) {
+        let currentCash = userCash;
+        for (const order of bookOrders) { // 'order' is the resting (maker) order
           if (remainingQty === 0) break;
           const matchQty = Math.min(remainingQty, order.quantity);
-          const tradePrice = parseFloat(order.price);
+          const tradePrice = parseFloat(order.price); // Trade price is the maker's price
 
-          if (side === 'buy') {
-            // For a market buy, ensure the buyer has enough cash for this portion
-            if (cashAvailable < tradePrice * matchQty) break;  // not enough cash to continue
+          if (side === 'buy') { // Incoming MARKET order is BUY (taker), resting order is SELL (maker)
+            if (currentCash < tradePrice * matchQty) {
+              console.log(`[ORDER_DEBUG] Market buy: Insufficient cash to fill remaining ${remainingQty} at price ${tradePrice}. Breaking.`);
+              break;
+            }
           }
-          // Record the trade in the trades history table
+          
+          console.log(`[ORDER_DEBUG] Market order matching: Trade ${matchQty} shares at ${tradePrice}. Maker Order ID: ${order.id}, Maker User ID: ${order.user_id}.`);
           await conn.query(
             `INSERT INTO trades 
                (symbol_id, price, quantity, buy_order_id, sell_order_id, buy_user_id, sell_user_id, taker_side)
@@ -307,63 +293,66 @@ router.post('/', verifyToken, async (req, res) => {
               side === 'buy' ? order.id : null,
               side === 'buy' ? userId : order.user_id,
               side === 'buy' ? order.user_id : userId,
-              side  // taker_side is the side of the incoming market order
+              side
             ]
           );
 
-          // Update the matched resting order's remaining quantity and status
           const newQty = order.quantity - matchQty;
           await conn.query(
             'UPDATE orders SET quantity = ?, status = ? WHERE id = ?',
             [newQty, newQty === 0 ? 'FILLED' : 'OPEN', order.id]
           );
 
-          // Cash and position transfers:
-          if (side === 'buy') {
+          if (side === 'buy') { // Incoming MARKET order is BUY (taker), resting order is SELL (maker)
             // Buyer (taker) pays cash, seller (maker) receives cash
+            console.log(`[ORDER_DEBUG] Market Buy: Deducting ${tradePrice * matchQty} from Taker (Buyer) user ${userId}.`);
             await conn.query(
               'UPDATE users SET cash_balance = cash_balance - ? WHERE id = ?',
-              [tradePrice * matchQty, userId]  // deduct from buyer
+              [tradePrice * matchQty, userId]  // deduct from buyer (taker)
             );
+            console.log(`[ORDER_DEBUG] Market Buy: Crediting ${tradePrice * matchQty} to Maker (Seller) user ${order.user_id}.`);
             await conn.query(
               'UPDATE users SET cash_balance = cash_balance + ? WHERE id = ?',
-              [tradePrice * matchQty, order.user_id]  // credit to seller
+              [tradePrice * matchQty, order.user_id]  // credit to seller (maker)
             );
-            // Buyer gains shares
+            
+            console.log(`[ORDER_DEBUG] Position update: Increasing quantity by ${matchQty} for Buyer (Taker) user ${userId}.`);
             await conn.query(
               `INSERT INTO positions (user_id, symbol_id, quantity)
                VALUES (?, ?, ?)
                ON DUPLICATE KEY UPDATE quantity = quantity + ?`,
               [userId, symbol_id, matchQty, matchQty]
             );
-            // Seller loses shares (for the maker's position; could go negative if it was a short sale)
+            console.log(`[ORDER_DEBUG] Position update: Decreasing quantity by ${matchQty} for Seller (Maker) user ${order.user_id}.`);
             await conn.query(
               `INSERT INTO positions (user_id, symbol_id, quantity)
                VALUES (?, ?, ?)
                ON DUPLICATE KEY UPDATE quantity = quantity - ?`,
               [order.user_id, symbol_id, -matchQty, matchQty]
             );
-            // Update buyer's available cash tracker for market buy loop
-            cashAvailable -= tradePrice * matchQty;
-          } else {
-            // side === 'sell' (seller is taker, buyer is maker)
+            currentCash -= tradePrice * matchQty;
+          } else { // Incoming MARKET order is SELL (taker), resting order is BUY (maker)
             // Seller (taker) receives cash, buyer (maker) pays cash
+            console.log(`[ORDER_DEBUG] Market Sell: Crediting ${tradePrice * matchQty} to Taker (Seller) user ${userId}.`);
             await conn.query(
               'UPDATE users SET cash_balance = cash_balance + ? WHERE id = ?',
               [tradePrice * matchQty, userId]   // credit cash to seller (taker)
             );
+            console.log(`[ORDER_DEBUG] Market Sell: Debiting ${tradePrice * matchQty} from Maker (Buyer) user ${order.user_id}.`);
             await conn.query(
               'UPDATE users SET cash_balance = cash_balance - ? WHERE id = ?',
               [tradePrice * matchQty, order.user_id]  // deduct cash from buyer (maker)
             );
-            // Seller's position decreases (short position increases in magnitude if they sold more than they had)
+            
+            // Positions: Seller (taker) decreases, Buyer (maker) increases
+            console.log(`[ORDER_DEBUG] Position update: Decreasing quantity by ${matchQty} for Seller (Taker) user ${userId}.`);
             await conn.query(
               `INSERT INTO positions (user_id, symbol_id, quantity)
                VALUES (?, ?, ?)
                ON DUPLICATE KEY UPDATE quantity = quantity - ?`,
               [userId, symbol_id, -matchQty, matchQty]
             );
-            // Buyer's position increases (they gain the shares)
+            console.log(`[ORDER_DEBUG] Position update: Increasing quantity by ${matchQty} for Buyer (Maker) user ${order.user_id}.`);
             await conn.query(
               `INSERT INTO positions (user_id, symbol_id, quantity)
                VALUES (?, ?, ?)
@@ -372,12 +361,24 @@ router.post('/', verifyToken, async (req, res) => {
             );
           }
 
-          tradesExecuted.push({ price: tradePrice, quantity: matchQty });
+          // Store trade details for later self-trade cash adjustment
+          tradesExecuted.push({
+            price: tradePrice, // Trade execution price
+            quantity: matchQty,
+            buyOrderId: order.side === 'buy' ? order.id : null, // If maker was a BUY order
+            buyUserId: order.side === 'buy' ? order.user_id : null,
+            sellOrderId: order.side === 'sell' ? order.id : null, // If maker was a SELL order
+            sellUserId: order.side === 'sell' ? order.user_id : null,
+            takerUserId: userId,
+            takerSide: side,
+            // Capture the original limit price of the maker order if it was a buy, for self-trade refund
+            makerOriginalPrice: parseFloat(order.price)
+          });
           remainingQty -= matchQty;
         }
 
         if (tradesExecuted.length === 0) {
-          // No trades could be executed (no liquidity)
+          console.log(`[ORDER_DEBUG] Market order could not be filled (no liquidity). Rolling back.`);
           await conn.rollback();
           return res.status(400).json({ message: 'No liquidity to fill market order' });
         }
@@ -388,28 +389,56 @@ router.post('/', verifyToken, async (req, res) => {
           'UPDATE symbols SET prev_price = ?, last_price = ? WHERE id = ?',
           [prevPrice, lastTradePrice, symbol_id]
         );
-        // Clean up any zero-quantity position rows
         await conn.query('DELETE FROM positions WHERE quantity = 0');
+
+        // *** CRUCIAL FINAL CASH ADJUSTMENT FOR SELF-TRADES (AFTER MARKET ORDER PROCESSING) ***
+        // This loop applies specifically to trades that occurred during THIS market order.
+        for (const trade of tradesExecuted) {
+            // Check if this trade was a self-trade, AND involved a buy order that was the maker.
+            // This is the scenario where a user's market SELL order hit their own LIMIT BUY order.
+            if (trade.buyOrderId !== null && trade.buyUserId === trade.takerUserId && trade.takerSide === 'sell') {
+                // The `trade.buyUserId` is the user whose limit buy order (maker) was filled.
+                // The `trade.takerUserId` is the user who placed the market sell (taker).
+                // If they are the same user, it's a self-trade.
+
+                // The cash for this buy order was initially RESERVED based on its limit price (`makerOriginalPrice`).
+                // Since it's a self-trade where the user effectively bought shares (from themselves) and immediately
+                // sold them (to themselves), resulting in no net position change, the initial reservation
+                // needs to be fully refunded.
+                const amountToRefundFromReserved = trade.makerOriginalPrice * trade.quantity;
+                
+                if (amountToRefundFromReserved > 0) {
+                    console.log(`[ORDER_DEBUG] Self-Trade (Market Sell hitting Limit Buy) Adjustment: Refunding original reserved amount ${amountToRefundFromReserved} for buy order ID ${trade.buyOrderId} to user ${trade.buyUserId}.`);
+                    await conn.query(
+                        'UPDATE users SET cash_balance = cash_balance + ? WHERE id = ?',
+                        [amountToRefundFromReserved, trade.buyUserId]
+                    );
+                }
+            }
+        }
+        // ********************************************************************************
+        
         await conn.commit();
+        console.log(`[ORDER_DEBUG] Market order committed for user ${userId}.`);
         return res.json({
           message: 'Market order processed',
           orderStatus: remainingQty === 0 ? 'FILLED' : 'PARTIAL',
           tradesExecuted
         });
-      }  // End of market order processing
+      }
 
       // --- Limit Order: place in order book and then attempt matching as taker if possible ---
-      // Insert the new order into the order book as OPEN
+      console.log(`[ORDER_DEBUG] Processing LIMIT order for user ${userId}.`);
       const [insertResult] = await conn.query(
         'INSERT INTO orders (user_id, symbol_id, side, price, quantity, status) VALUES (?, ?, ?, ?, ?, ?)',
-        [userId, symbol_id, side, price !== null ? price : 0, remainingQty, 'OPEN']
+        [userId, symbol_id, side, price, remainingQty, 'OPEN']
       );
       newOrderId = insertResult.insertId;
+      console.log(`[ORDER_DEBUG] New limit order inserted with ID: ${newOrderId}, remainingQty: ${remainingQty}.`);
 
-      if (side === 'buy') {
-        // Match the new buy order (taker) against lowest sell orders (makers)
+      if (side === 'buy') { // Incoming LIMIT order is BUY (taker), resting order is SELL (maker)
         const [sellOrders] = await conn.query(
-          `SELECT * FROM orders 
+          `SELECT id, user_id, price, quantity, side FROM orders 
              WHERE symbol_id = ? AND side = 'sell' AND status = 'OPEN' 
              AND price <= ? 
              ORDER BY price ASC, id ASC 
@@ -417,51 +446,77 @@ router.post('/', verifyToken, async (req, res) => {
           [symbol_id, price]
         );
         for (const sellOrder of sellOrders) {
-          if (remainingQty <= 0) break;
+          if (remainingQty <= 0) {
+            console.log(`[ORDER_DEBUG] Limit buy order ${newOrderId}: remaining quantity is 0 or less. Breaking matching loop.`);
+            break;
+          }
           const matchQty = Math.min(remainingQty, sellOrder.quantity);
-          const tradePrice = parseFloat(sellOrder.price);
+          const tradePrice = parseFloat(sellOrder.price); // Trade price is the maker's price
           const takerSide = 'buy';
-          // Record the trade
+          
+          console.log(`[ORDER_DEBUG] Limit buy order ${newOrderId} matching with sell order ${sellOrder.id}: Trade ${matchQty} shares at ${tradePrice}.`);
           await conn.query(
             `INSERT INTO trades 
                (symbol_id, price, quantity, buy_order_id, sell_order_id, buy_user_id, sell_user_id, taker_side)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             [symbol_id, tradePrice, matchQty, newOrderId, sellOrder.id, userId, sellOrder.user_id, takerSide]
           );
-          // Decrease remaining quantity to buy
           remainingQty -= matchQty;
-          // Update the matched sell order's quantity/status
+          console.log(`[ORDER_DEBUG] Order ${newOrderId} remaining quantity after trade: ${remainingQty}.`);
+
           const newSellQty = sellOrder.quantity - matchQty;
           await conn.query(
             'UPDATE orders SET quantity = ?, status = ? WHERE id = ?',
             [newSellQty, newSellQty === 0 ? 'FILLED' : 'OPEN', sellOrder.id]
           );
-          // Update positions: buyer gains shares, seller loses shares
+          // Positions: Buyer (taker) gains, Seller (maker) loses
+          console.log(`[ORDER_DEBUG] Position update: Increasing quantity by ${matchQty} for Buyer (Taker) user ${userId}.`);
           await conn.query(
             `INSERT INTO positions (user_id, symbol_id, quantity)
              VALUES (?, ?, ?)
              ON DUPLICATE KEY UPDATE quantity = quantity + ?`,
             [userId, symbol_id, matchQty, matchQty]
           );
+          console.log(`[ORDER_DEBUG] Position update: Decreasing quantity by ${matchQty} for Seller (Maker) user ${sellOrder.user_id}.`);
           await conn.query(
             `INSERT INTO positions (user_id, symbol_id, quantity)
              VALUES (?, ?, ?)
              ON DUPLICATE KEY UPDATE quantity = quantity - ?`,
-            [sellOrder.user_id, symbol_id, -matchQty, matchQty]  // seller position decreases (may go negative if short)
+            [sellOrder.user_id, symbol_id, -matchQty, matchQty]
           );
-          // Cash transfers: buyer pays, seller receives
+          // Cash transfers: Seller (maker) receives
+          console.log(`[ORDER_DEBUG] Limit Buy: Crediting ${tradePrice * matchQty} to Maker (Seller) user ${sellOrder.user_id}.`);
           await conn.query(
             'UPDATE users SET cash_balance = cash_balance + ? WHERE id = ?',
-            [tradePrice * matchQty, sellOrder.user_id]  // credit seller
+            [tradePrice * matchQty, sellOrder.user_id]  // credit seller (maker)
           );
-          // Note: We already debited buyer's cash upfront for full quantity. We'll refund any excess below.
-          tradesExecuted.push({ price: tradePrice, quantity: matchQty });
+          // Refund difference to buyer (taker) if trade price is lower than limit price
+          // Buyer was initially debited for 'price * quantity'.
+          // For this matched portion, they should only pay 'tradePrice * matchQty'.
+          const buyerRefundForThisTrade = (price - tradePrice) * matchQty;
+          if (buyerRefundForThisTrade > 0) {
+            console.log(`[ORDER_DEBUG] Refunding ${buyerRefundForThisTrade} to Taker (Buyer) user ${userId} for better fill price on limit buy order ${newOrderId}.`);
+            await conn.query(
+              'UPDATE users SET cash_balance = cash_balance + ? WHERE id = ?',
+              [buyerRefundForThisTrade, userId]
+            );
+          }
+          tradesExecuted.push({
+            price: tradePrice,
+            quantity: matchQty,
+            buyOrderId: newOrderId, // This new order is the taker buy
+            buyUserId: userId,
+            sellOrderId: sellOrder.id, // existing order is maker sell
+            sellUserId: sellOrder.user_id,
+            takerUserId: userId, // New order is the taker
+            takerSide: takerSide,
+            makerOriginalPrice: parseFloat(sellOrder.price) // Maker's original price (sell order's price)
+          });
           if (remainingQty === 0) break;
         }
-      } else if (side === 'sell') {
-        // Match the new sell order (taker) against highest buy orders (makers)
+      } else if (side === 'sell') { // Incoming LIMIT order is SELL (taker), resting order is BUY (maker)
         const [buyOrders] = await conn.query(
-          `SELECT * FROM orders 
+          `SELECT id, user_id, price, quantity, side FROM orders 
              WHERE symbol_id = ? AND side = 'buy' AND status = 'OPEN' 
              AND price >= ? 
              ORDER BY price DESC, id ASC 
@@ -469,10 +524,14 @@ router.post('/', verifyToken, async (req, res) => {
           [symbol_id, price]
         );
         for (const buyOrder of buyOrders) {
-          if (remainingQty <= 0) break;
+          if (remainingQty <= 0) {
+            console.log(`[ORDER_DEBUG] Limit sell order ${newOrderId}: remaining quantity is 0 or less. Breaking matching loop.`);
+            break;
+          }
           const matchQty = Math.min(remainingQty, buyOrder.quantity);
-          const tradePrice = parseFloat(buyOrder.price);
+          const tradePrice = parseFloat(buyOrder.price); // Trade price is the maker's price
           const takerSide = 'sell';
+          console.log(`[ORDER_DEBUG] Limit sell order ${newOrderId} matching with buy order ${buyOrder.id}: Trade ${matchQty} shares at ${tradePrice}.`);
           await conn.query(
             `INSERT INTO trades 
                (symbol_id, price, quantity, buy_order_id, sell_order_id, buy_user_id, sell_user_id, taker_side)
@@ -480,117 +539,137 @@ router.post('/', verifyToken, async (req, res) => {
             [symbol_id, tradePrice, matchQty, buyOrder.id, newOrderId, buyOrder.user_id, userId, takerSide]
           );
           remainingQty -= matchQty;
-          // Update matched buy order
+          console.log(`[ORDER_DEBUG] Order ${newOrderId} remaining quantity after trade: ${remainingQty}.`);
+
           const newBuyQty = buyOrder.quantity - matchQty;
           await conn.query(
             'UPDATE orders SET quantity = ?, status = ? WHERE id = ?',
             [newBuyQty, newBuyQty === 0 ? 'FILLED' : 'OPEN', buyOrder.id]
           );
-          // Update positions: buyer (maker) gains shares, seller (taker) loses shares
+          // Positions: Buyer (maker) gains, Seller (taker) loses
+          console.log(`[ORDER_DEBUG] Position update: Increasing quantity by ${matchQty} for Buyer (Maker) user ${buyOrder.user_id}.`);
           await conn.query(
             `INSERT INTO positions (user_id, symbol_id, quantity)
              VALUES (?, ?, ?)
              ON DUPLICATE KEY UPDATE quantity = quantity + ?`,
             [buyOrder.user_id, symbol_id, matchQty, matchQty]
           );
+          console.log(`[ORDER_DEBUG] Position update: Decreasing quantity by ${matchQty} for Seller (Taker) user ${userId}.`);
           await conn.query(
             `INSERT INTO positions (user_id, symbol_id, quantity)
              VALUES (?, ?, ?)
              ON DUPLICATE KEY UPDATE quantity = quantity - ?`,
             [userId, symbol_id, -matchQty, matchQty]
           );
-          // Cash transfers: buyer pays, seller receives
+          // Cash transfers: Buyer (maker) pays, Seller (taker) receives
+          console.log(`[ORDER_DEBUG] Limit Sell: Debiting ${tradePrice * matchQty} from Maker (Buyer) user ${buyOrder.user_id}.`);
           await conn.query(
             'UPDATE users SET cash_balance = cash_balance - ? WHERE id = ?',
-            [tradePrice * matchQty, buyOrder.user_id]  // deduct buyer's cash
+            [tradePrice * matchQty, buyOrder.user_id]
           );
+          console.log(`[ORDER_DEBUG] Limit Sell: Crediting ${tradePrice * matchQty} to Taker (Seller) user ${userId}.`);
           await conn.query(
             'UPDATE users SET cash_balance = cash_balance + ? WHERE id = ?',
-            [tradePrice * matchQty, userId]  // credit seller
+            [tradePrice * matchQty, userId]
           );
-          tradesExecuted.push({ price: tradePrice, quantity: matchQty });
+          tradesExecuted.push({
+            price: tradePrice,
+            quantity: matchQty,
+            buyOrderId: buyOrder.id, // existing order is maker buy
+            buyUserId: buyOrder.user_id,
+            sellOrderId: newOrderId, // new order is taker sell
+            sellUserId: userId,
+            takerUserId: userId, // New order is the taker
+            takerSide: takerSide,
+            makerOriginalPrice: parseFloat(buyOrder.price) // Maker's original price (buy order's price)
+          });
           if (remainingQty === 0) break;
         }
       }
 
-      // Update the new order's remaining quantity and status in the order book
+      // Update the new order's final quantity and status in the order book
       if (remainingQty > 0) {
-        // Order was only partially filled or not filled at all
+        console.log(`[ORDER_DEBUG] Order ${newOrderId} is PARTIAL or OPEN. Remaining quantity: ${remainingQty}.`);
         await conn.query(
           'UPDATE orders SET quantity = ? WHERE id = ?',
           [remainingQty, newOrderId]
         );
       } else {
-        // Order fully filled
+        console.log(`[ORDER_DEBUG] Order ${newOrderId} is FILLED. Setting quantity to 0.`);
         await conn.query(
           'UPDATE orders SET status = ?, quantity = 0 WHERE id = ?',
           ['FILLED', newOrderId]
         );
       }
 
-      // Refund excess reserved cash for limit buy or short sell if fully filled with less quantity or at better price
-      if (side === 'buy' && type === 'limit') {
-        if (remainingQty < quantity) {
-          // Some or all filled – calculate total spent vs reserved
-          const totalSpent = tradesExecuted.reduce((sum, t) => sum + (t.price * t.quantity), 0);
-          const totalReserved = price * quantity;
-          const refund = totalReserved - totalSpent;
-          if (refund > 0) {
-            await conn.query(
-              'UPDATE users SET cash_balance = cash_balance + ? WHERE id = ?',
-              [refund, userId]
-            );
-          }
+      // *** CRUCIAL FINAL CASH ADJUSTMENT FOR BUY LIMIT ORDERS AFTER ALL MATCHING (INCLUDING SELF-TRADES) ***
+      // This loop runs after all trades for the current order are processed.
+      // It handles cases where a BUY LIMIT order (newly placed or existing) was filled.
+      for (const trade of tradesExecuted) {
+        // If this trade involved a BUY order (either the new order or a maker order)
+        // AND that BUY order was a LIMIT order (which caused upfront cash reservation)
+        // AND the user is the same as the user who placed the buy order
+        if (trade.buyOrderId !== null && trade.buyUserId === userId) {
+            // Retrieve the original limit price of the BUY order that was filled.
+            // (We already stored `makerOriginalPrice` in `tradesExecuted` for maker orders,
+            // and `price` is available for the newly placed order.)
+            const originalBuyLimitPrice = (trade.buyOrderId === newOrderId && type === 'limit' && side === 'buy')
+                                            ? price // If the newly placed order was the limit buy that got filled
+                                            : trade.makerOriginalPrice; // If an existing limit buy order (maker) got filled
+
+            // Calculate the amount initially reserved for this specific matched quantity based on original limit price
+            const reservedAmountForThisTrade = originalBuyLimitPrice * trade.quantity;
+            // Calculate the actual amount spent for this specific matched quantity based on trade price
+            const actualSpentAmount = trade.price * trade.quantity;
+
+            // The difference between reserved and actual spent needs to be refunded to the buyer.
+            // This handles both (a) external fills at a better price, and (b) self-trades
+            // where the original reservation needs to be reconciled.
+            const refundAmount = reservedAmountForThisTrade - actualSpentAmount;
+
+            if (refundAmount > 0) {
+                console.log(`[ORDER_DEBUG] Post-Trade Buy Limit Refund: Refunding ${refundAmount} to user ${trade.buyUserId} for order ID ${trade.buyOrderId}. (Reserved: ${reservedAmountForThisTrade}, Spent: ${actualSpentAmount})`);
+                await conn.query(
+                    'UPDATE users SET cash_balance = cash_balance + ? WHERE id = ?',
+                    [refundAmount, trade.buyUserId]
+                );
+            } else {
+               console.log(`[ORDER_DEBUG] Post-Trade Buy Limit Refund: No additional refund for order ID ${trade.buyOrderId}, refundAmount was ${refundAmount}. (Reserved: ${reservedAmountForThisTrade}, Spent: ${actualSpentAmount})`);
+            }
         }
       }
-      if (side === 'sell' && type === 'limit') {
-        if (quantity > userPos) {
-          // If short sell had reserved collateral, refund unused portion
-          const shortQtyInitial = quantity - (userPos > 0 ? userPos : 0);
-          // Collateral initially reserved = price * shortQtyInitial
-          // Calculate short quantity actually executed:
-          const shortQtyExecuted = tradesExecuted.reduce((sum, t) => sum + t.quantity, 0) - (userPos > 0 ? Math.min(userPos, tradesExecuted.reduce((sum, t) => sum + t.quantity, 0)) : 0);
-          // shortQtyExecuted = total sold beyond what user owned (approximation)
-          // Actually, simpler: remaining short portion not executed = (shortQtyInitial - (quantity - remainingQty - userPosRemaining))
-          // For simplicity, if order fully filled or partially, we'll refund based on remainingQty:
-          const remainingShortQty = remainingQty - (userPos > 0 ? Math.max(0, userPos - (quantity - remainingQty)) : 0);
-          // remainingShortQty is the part of initial short that didn't execute
-          const refundCollateral = price * (remainingShortQty > 0 ? remainingShortQty : 0);
-          if (refundCollateral > 0) {
-            await conn.query(
-              'UPDATE users SET cash_balance = cash_balance + ? WHERE id = ?',
-              [refundCollateral, userId]
-            );
-          }
-        }
-      }
+      // ********************************************************************************
 
       // Update symbol last_price and prev_price if any trade executed
       if (tradesExecuted.length > 0) {
         const lastTradePrice = tradesExecuted[tradesExecuted.length - 1].price;
         const prevPrice = symRow.last_price !== null ? symRow.last_price : lastTradePrice;
+        console.log(`[ORDER_DEBUG] Updating symbol ${symbol_id} prices. Prev: ${prevPrice}, Last: ${lastTradePrice}.`);
         await conn.query(
           'UPDATE symbols SET prev_price = ?, last_price = ? WHERE id = ?',
           [prevPrice, lastTradePrice, symbol_id]
         );
+      } else {
+        console.log(`[ORDER_DEBUG] No trades executed for order ${newOrderId}. Symbol price not updated.`);
       }
 
-      // Clean up any zero-quantity positions
       await conn.query('DELETE FROM positions WHERE quantity = 0');
+      console.log(`[ORDER_DEBUG] Cleaning up zero quantity positions.`);
 
       await conn.commit();
-      const status = (remainingQty === 0 ? 'FILLED' : (remainingQty < quantity ? 'PARTIAL' : 'OPEN'));
+      console.log(`[ORDER_DEBUG] Transaction committed successfully for order ${newOrderId}.`);
+      const status = (remainingQty === 0 ? 'FILLED' : (tradesExecuted.length > 0 ? 'PARTIAL' : 'OPEN'));
       res.json({ message: 'Order placed', orderStatus: status, tradesExecuted });
     } catch (err) {
-      // On any error, rollback the transaction and restore reserved funds if needed
       await conn.rollback();
-      console.error(err);
+      console.error(`[ERROR] Transaction rolled back for order placement for user ${userId}, symbol ${symbol_id}. Details:`, err.message, err.stack);
       res.status(500).json({ message: 'Error processing order' });
     } finally {
       conn.release();
+      console.log(`[ORDER_DEBUG] Database connection released for user ${userId}.`);
     }
   } catch (err) {
-    console.error(err);
+    console.error(`[ERROR] Server error placing order (outside transaction) for user ${userId}, symbol ${symbol_id}. Details:`, err.message, err.stack);
     res.status(500).json({ message: 'Server error placing order' });
   }
 });
@@ -602,52 +681,47 @@ router.post('/', verifyToken, async (req, res) => {
 router.delete('/:id', verifyToken, async (req, res) => {
   const orderId = parseInt(req.params.id, 10);
   const userId = req.user.id;
+  console.log(`[CANCEL_DEBUG] Attempting to cancel order ${orderId} for user ${userId}.`);
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
-    // Lock the order row for update
     const [[order]] = await conn.query(
       'SELECT * FROM orders WHERE id = ? AND user_id = ? AND status = "OPEN" FOR UPDATE',
       [orderId, userId]
     );
     if (!order) {
+      console.log(`[CANCEL_DEBUG] Order ${orderId} not found, not owned by user ${userId}, or not open.`);
       await conn.rollback();
       return res.status(404).json({ message: 'Order not found or already filled/cancelled' });
     }
-    // If it’s a buy order, refund the reserved cash (price * remaining quantity)
     if (order.side === 'buy') {
-      const refundAmount = parseFloat(order.price) * order.quantity;
-      await conn.query(
-        'UPDATE users SET cash_balance = cash_balance + ? WHERE id = ?',
-        [refundAmount, userId]
-      );
-    }
-    // If it’s a sell order that was a short (user had reserved collateral), refund that as well
-    if (order.side === 'sell') {
-      // Determine user's position at time of order placement to know short portion.
-      // Easiest: if user currently has negative position due to this order (and not yet covered), or if their position in this symbol increased after placing order.
-      // We will conservatively refund based on order's price * remaining quantity (assuming that was reserved).
-      if (order.quantity > 0) {
-        const refundCollateral = parseFloat(order.price) * order.quantity;
+      const refundAmount = parseFloat(order.price) * order.quantity; // order.quantity is the *remaining* quantity
+      if (refundAmount > 0) {
+        console.log(`[CANCEL_DEBUG] Refunding ${refundAmount} to user ${userId} for cancelled buy order ${orderId}.`);
         await conn.query(
           'UPDATE users SET cash_balance = cash_balance + ? WHERE id = ?',
-          [refundCollateral, userId]
+          [refundAmount, userId]
         );
+      } else {
+        console.log(`[CANCEL_DEBUG] No refund needed for buy order ${orderId} as remaining quantity is 0.`);
       }
+    } else {
+      console.log(`[CANCEL_DEBUG] No refund needed for sell order ${orderId} (cash not reserved upfront).`);
     }
-    // Mark the order as cancelled in the order book
     await conn.query(
       'UPDATE orders SET status = "CANCELLED", quantity = 0 WHERE id = ?',
       [orderId]
     );
     await conn.commit();
+    console.log(`[CANCEL_DEBUG] Transaction committed successfully for order ${orderId} cancellation.`);
     res.json({ message: 'Order cancelled successfully' });
   } catch (err) {
     await conn.rollback();
-    console.error(err);
+    console.error(`[ERROR] Transaction rolled back for order cancellation for user ${userId}, order ${orderId}. Details:`, err.message, err.stack);
     res.status(500).json({ message: 'Failed to cancel order' });
   } finally {
     conn.release();
+    console.log(`[CANCEL_DEBUG] Database connection released for order ${orderId} cancellation.`);
   }
 });
 

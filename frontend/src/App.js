@@ -13,6 +13,7 @@ import Dashboard   from './components/Dashboard';
 import NotFound    from './components/NotFound';
 import RecentTradesPage from './components/RecentTradesPage';
 import { loadSession, clearSession } from './utils/authStorage';
+import Assessment from './Assessment';
 
 // gate that injects the right token/user for /u/:username/*
 function UserGate() {
@@ -41,6 +42,7 @@ export default function App() {
         <Route path="/u/:username"               element={<Navigate to="dashboard" replace />} />
         <Route path="/u/:username/dashboard"     element={<UserGate />} />
         <Route path="/u/:username/symbol/:symbolId/recent_trade" element={<RecentTradesPage />} />
+        <Route path="/u/:username/assessment" element={<Assessment />} />
 
         <Route path="*" element={<NotFound />} />
       </Routes>

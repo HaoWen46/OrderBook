@@ -5,11 +5,11 @@ USE orderbook;
 
 -- Users table
 CREATE TABLE users (
-  id           INT AUTO_INCREMENT PRIMARY KEY,
-  username     VARCHAR(50) NOT NULL UNIQUE,
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  username      VARCHAR(50) NOT NULL UNIQUE,
   password_hash VARCHAR(100) NOT NULL,
-  role         ENUM('user','manager') NOT NULL DEFAULT 'user',
-  cash_balance DECIMAL(15,2) NOT NULL DEFAULT 0.00
+  role          ENUM('user','manager') NOT NULL DEFAULT 'user',
+  cash_balance  DECIMAL(15,2) NOT NULL DEFAULT 0.00
 );
 
 -- Symbols (trading instruments)
@@ -19,7 +19,7 @@ CREATE TABLE symbols (
   type               ENUM('stock','call','put') NOT NULL DEFAULT 'stock',
   last_price         DECIMAL(15,2) DEFAULT NULL,
   prev_price         DECIMAL(15,2) DEFAULT NULL,
-  outstanding_shares INT NOT NULL DEFAULT 0,
+  outstanding_shares INT NOT NULL DEFAULT 0
 );
 
 -- Positions (user holdings for each symbol)

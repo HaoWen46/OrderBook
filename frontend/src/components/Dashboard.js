@@ -210,6 +210,9 @@ function Dashboard({ token, user, onLogout }) {
             Cash&nbsp;Balance:&nbsp;${Number(userData.cash_balance||0).toFixed(2)}
           </div>
           <div className="flex gap-2">
+            <Link to={`/u/${userData.username}/assessment`}>
+              <button className="btn-lite">Risk Assessment</button>
+            </Link>
             <button className="btn-lite" onClick={() => setView('changePass')}>Change PW</button>
             <button className="btn-lite" onClick={handleDeleteAccount}>Delete Account</button>
             <button className="btn-lite" onClick={onLogout}>Logout</button>
