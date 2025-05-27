@@ -4,17 +4,20 @@ A full-stack application with Node.js backend and frontend, plus a Python FHE (F
 
 ## Prerequisites
 
-- **Node.js** (version 16 or higher)
-- **npm** (comes with Node.js)
-- **Python 3.10** (for FHE service)
+* **Node.js** (version 16 or higher)
+* **npm** (comes with Node.js)
+* **Python 3.10** (for FHE service)
 
 ## Quick Start
 
 ### 1. Install Dependencies
 
-Install dependencies for both backend and frontend:
+Install dependencies for the root, backend, and frontend:
 
 ```bash
+# Install root dependencies (if a package.json exists in the root)
+npm install
+
 # Install backend dependencies
 cd backend
 npm install
@@ -31,30 +34,36 @@ cd ..
 You'll need **3 terminal windows** to run all services:
 
 #### Terminal 1 - Backend Server
+
 ```bash
 cd backend
 npm start
 ```
-Backend will run at: **http://localhost:3000**
+
+Backend will run at: **[http://localhost:3000](http://localhost:3000)**
 
 #### Terminal 2 - Frontend Server
+
 ```bash
 cd frontend
 npm start
 ```
-Frontend will run at: **http://localhost:5000**
+
+Frontend will run at: **[http://localhost:5000](http://localhost:5000)**
 
 #### Terminal 3 - FHE Service (Optional)
+
 ```bash
 cd fhe_service
 pip install fastapi uvicorn tenseal pydantic
 python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
-FHE service will run at: **http://localhost:8000**
+
+FHE service will run at: **[http://localhost:8000](http://localhost:8000)**
 
 ## Usage
 
-1. Open your browser and go to **http://localhost:5000**
+1. Open your browser and go to **[http://localhost:5000](http://localhost:5000)**
 2. The frontend will communicate with the backend at port 3000
 3. If using FHE features, the backend will communicate with the FHE service at port 8000
 
@@ -71,6 +80,7 @@ project/
 ## Troubleshooting
 
 **Port already in use:**
+
 ```bash
 # Kill processes on specific ports
 # macOS/Linux:
@@ -83,6 +93,7 @@ taskkill /PID <PID_NUMBER> /F
 ```
 
 **Node.js version issues:**
+
 ```bash
 # Check your Node.js version
 node --version
@@ -91,6 +102,7 @@ node --version
 ```
 
 **npm install fails:**
+
 ```bash
 # Clear npm cache and retry
 npm cache clean --force
@@ -100,9 +112,9 @@ npm install
 
 ## Development
 
-- Backend and frontend support hot reload (changes will auto-refresh)
-- FHE service uses `--reload` flag for development
-- No build step required for development
+* Backend and frontend support hot reload (changes will auto-refresh)
+* FHE service uses `--reload` flag for development
+* No build step required for development
 
 ## Production
 
