@@ -40,7 +40,7 @@ cd backend
 npm start
 ```
 
-Backend will run at: **[http://localhost:3000](http://localhost:3000)**
+Backend will run at: **[http://localhost:5000](http://localhost:5000)**
 
 #### Terminal 2 - Frontend Server
 
@@ -49,7 +49,7 @@ cd frontend
 npm start
 ```
 
-Frontend will run at: **[http://localhost:5000](http://localhost:5000)**
+Frontend will run at: **[http://localhost:3000](http://localhost:3000)**
 
 #### Terminal 3 - FHE Service (Optional)
 
@@ -63,16 +63,16 @@ FHE service will run at: **[http://localhost:8000](http://localhost:8000)**
 
 ## Usage
 
-1. Open your browser and go to **[http://localhost:5000](http://localhost:5000)**
-2. The frontend will communicate with the backend at port 3000
+1. Open your browser and go to **[http://localhost:3000](http://localhost:3000)**
+2. The frontend will communicate with the backend at port 5000
 3. If using FHE features, the backend will communicate with the FHE service at port 8000
 
 ## Project Structure
 
 ```
 project/
-├── backend/          # Node.js backend server (port 3000)
-├── frontend/         # Frontend application (port 5000)
+├── backend/          # Node.js backend server (port 5000)
+├── frontend/         # Frontend application (port 3000)
 ├── fhe_service/      # Python FHE service (port 8000)
 └── README.md         # This file
 ```
