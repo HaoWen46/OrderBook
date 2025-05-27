@@ -9,7 +9,6 @@
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
-    "build": "^0.1.4",
     "cors": "^2.8.5",
     "dotenv": "^16.0.3",
     "express": "^4.18.2",

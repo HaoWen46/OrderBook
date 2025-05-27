@@ -73,9 +73,9 @@ router.get('/my', verifyToken, async (req, res) => {
   try {
     const userId = req.user.id;
     const [orders] = await pool.query(
-      `SELECT o.id, o.symbol_id, s.symbol, o.side, o.price, o.quantity 
-         FROM orders o 
-         JOIN symbols s ON o.symbol_id = s.id 
+      `SELECT o.id, o.symbol_id, s.symbol, o.side, o.price, o.quantity
+         FROM orders o
+         JOIN symbols s ON o.symbol_id = s.id
          WHERE o.user_id = ? AND o.status = 'OPEN'`,
       [userId]
     );
@@ -95,11 +95,11 @@ router.get('/myTrades', verifyToken, async (req, res) => {
     const userId = req.user.id;
     const [trades] = await pool.query(
       `SELECT t.price, t.quantity, t.timestamp, s.symbol,
-         CASE 
-           WHEN t.buy_user_id = ? THEN 'buy' 
-           ELSE 'sell' 
+         CASE
+           WHEN t.buy_user_id = ? THEN 'buy'
+           ELSE 'sell'
          END AS side
-       FROM trades t 
+       FROM trades t
        JOIN symbols s ON t.symbol_id = s.id
        WHERE t.buy_user_id = ? OR t.sell_user_id = ?
        ORDER BY t.timestamp DESC
@@ -251,7 +251,7 @@ router.post('/', verifyToken, async (req, res) => {
       let newOrderId = null;
       let remainingQty = quantity;
       // Store trade details for post-processing cash adjustments for self-trades
-      const tradesExecuted = []; 
+      const tradesExecuted = [];
 
       if (type === 'market') {
         console.log(`[ORDER_DEBUG] Processing MARKET order for user ${userId}.`);
@@ -259,11 +259,11 @@ router.post('/', verifyToken, async (req, res) => {
         const orderByClause = (side === 'buy') ? 'price ASC, id ASC' : 'price DESC, id ASC';
         // Select maker order's price and quantity
         const [bookOrders] = await conn.query(
-          `SELECT id, user_id, price, quantity, side FROM orders 
-            WHERE symbol_id = ? 
-              AND side = ? 
+          `SELECT id, user_id, price, quantity, side FROM orders
+            WHERE symbol_id = ?
+              AND side = ?
               AND status = 'OPEN'
-            ORDER BY ${orderByClause} 
+            ORDER BY ${orderByClause}
             FOR UPDATE`,
           [symbol_id, sideToHit]
         );
@@ -279,10 +279,10 @@ router.post('/', verifyToken, async (req, res) => {
               break;
             }
           }
-          
+
           console.log(`[ORDER_DEBUG] Market order matching: Trade ${matchQty} shares at ${tradePrice}. Maker Order ID: ${order.id}, Maker User ID: ${order.user_id}.`);
           await conn.query(
-            `INSERT INTO trades 
+            `INSERT INTO trades
                (symbol_id, price, quantity, buy_order_id, sell_order_id, buy_user_id, sell_user_id, taker_side)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             [
@@ -315,7 +315,7 @@ router.post('/', verifyToken, async (req, res) => {
               'UPDATE users SET cash_balance = cash_balance + ? WHERE id = ?',
               [tradePrice * matchQty, order.user_id]  // credit to seller (maker)
             );
-            
+
             console.log(`[ORDER_DEBUG] Position update: Increasing quantity by ${matchQty} for Buyer (Taker) user ${userId}.`);
             await conn.query(
               `INSERT INTO positions (user_id, symbol_id, quantity)
@@ -343,7 +343,7 @@ router.post('/', verifyToken, async (req, res) => {
               'UPDATE users SET cash_balance = cash_balance - ? WHERE id = ?',
               [tradePrice * matchQty, order.user_id]  // deduct cash from buyer (maker)
             );
-            
+
             // Positions: Seller (taker) decreases, Buyer (maker) increases
             console.log(`[ORDER_DEBUG] Position update: Decreasing quantity by ${matchQty} for Seller (Taker) user ${userId}.`);
             await conn.query(
@@ -406,7 +406,7 @@ router.post('/', verifyToken, async (req, res) => {
                 // sold them (to themselves), resulting in no net position change, the initial reservation
                 // needs to be fully refunded.
                 const amountToRefundFromReserved = trade.makerOriginalPrice * trade.quantity;
-                
+
                 if (amountToRefundFromReserved > 0) {
                     console.log(`[ORDER_DEBUG] Self-Trade (Market Sell hitting Limit Buy) Adjustment: Refunding original reserved amount ${amountToRefundFromReserved} for buy order ID ${trade.buyOrderId} to user ${trade.buyUserId}.`);
                     await conn.query(
@@ -417,7 +417,7 @@ router.post('/', verifyToken, async (req, res) => {
             }
         }
         // ********************************************************************************
-        
+
         await conn.commit();
         console.log(`[ORDER_DEBUG] Market order committed for user ${userId}.`);
         return res.json({
@@ -438,10 +438,10 @@ router.post('/', verifyToken, async (req, res) => {
 
       if (side === 'buy') { // Incoming LIMIT order is BUY (taker), resting order is SELL (maker)
         const [sellOrders] = await conn.query(
-          `SELECT id, user_id, price, quantity, side FROM orders 
-             WHERE symbol_id = ? AND side = 'sell' AND status = 'OPEN' 
-             AND price <= ? 
-             ORDER BY price ASC, id ASC 
+          `SELECT id, user_id, price, quantity, side FROM orders
+             WHERE symbol_id = ? AND side = 'sell' AND status = 'OPEN'
+             AND price <= ?
+             ORDER BY price ASC, id ASC
              FOR UPDATE`,
           [symbol_id, price]
         );
@@ -453,10 +453,10 @@ router.post('/', verifyToken, async (req, res) => {
           const matchQty = Math.min(remainingQty, sellOrder.quantity);
           const tradePrice = parseFloat(sellOrder.price); // Trade price is the maker's price
           const takerSide = 'buy';
-          
+
           console.log(`[ORDER_DEBUG] Limit buy order ${newOrderId} matching with sell order ${sellOrder.id}: Trade ${matchQty} shares at ${tradePrice}.`);
           await conn.query(
-            `INSERT INTO trades 
+            `INSERT INTO trades
                (symbol_id, price, quantity, buy_order_id, sell_order_id, buy_user_id, sell_user_id, taker_side)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             [symbol_id, tradePrice, matchQty, newOrderId, sellOrder.id, userId, sellOrder.user_id, takerSide]
@@ -516,10 +516,10 @@ router.post('/', verifyToken, async (req, res) => {
         }
       } else if (side === 'sell') { // Incoming LIMIT order is SELL (taker), resting order is BUY (maker)
         const [buyOrders] = await conn.query(
-          `SELECT id, user_id, price, quantity, side FROM orders 
-             WHERE symbol_id = ? AND side = 'buy' AND status = 'OPEN' 
-             AND price >= ? 
-             ORDER BY price DESC, id ASC 
+          `SELECT id, user_id, price, quantity, side FROM orders
+             WHERE symbol_id = ? AND side = 'buy' AND status = 'OPEN'
+             AND price >= ?
+             ORDER BY price DESC, id ASC
              FOR UPDATE`,
           [symbol_id, price]
         );
@@ -533,7 +533,7 @@ router.post('/', verifyToken, async (req, res) => {
           const takerSide = 'sell';
           console.log(`[ORDER_DEBUG] Limit sell order ${newOrderId} matching with buy order ${buyOrder.id}: Trade ${matchQty} shares at ${tradePrice}.`);
           await conn.query(
-            `INSERT INTO trades 
+            `INSERT INTO trades
                (symbol_id, price, quantity, buy_order_id, sell_order_id, buy_user_id, sell_user_id, taker_side)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             [symbol_id, tradePrice, matchQty, buyOrder.id, newOrderId, buyOrder.user_id, userId, takerSide]

@@ -34,8 +34,8 @@ router.post('/', verifyToken, requireManager, async (req, res) => {
     await conn.beginTransaction();
     // Insert the new stock symbol
     const [result] = await conn.query(
-      'INSERT INTO symbols (symbol) VALUES (?, ?, ?)',
-      [symbol, 'stock', null]
+      'INSERT INTO symbols (symbol) VALUES (?)',
+      [symbol]
     );
     const newStockId = result.insertId;
     await conn.commit();

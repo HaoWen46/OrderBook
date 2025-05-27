@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react'; // Import useCallback
 import { Link } from 'react-router-dom';
 import ChangePassword from './ChangePassword';
 import OrderBook from './OrderBook';
@@ -6,10 +6,10 @@ import OrderForm from './OrderForm';
 import './Dashboard.css';
 
 /**
- * Dashboard – full‑fat version with:           
+ * Dashboard – full‑fat version with:
  *  • live book & trades for the currently‑selected symbol
  *  • basic wallet / open‑orders list
- *  • (manager‑only) add / mint / burn / delete stock symbols                                           
+ *  • (manager‑only) add / mint / burn / delete stock symbols
  */
 function Dashboard({ token, user, onLogout }) {
   /* ---------------- state ---------------- */
@@ -19,6 +19,7 @@ function Dashboard({ token, user, onLogout }) {
   const [sellOrders, setSellOrders]     = useState([]);
   const [lastPrice, setLastPrice]       = useState(null);
   const [priceDirection, setPriceDirection] = useState('same'); // up / down / same
+  const [trades, setTrades]             = useState([]);          // ADDED: State for recent trades
   const [userData, setUserData]         = useState(user || {});
   const [userOrders, setUserOrders]     = useState([]);
   const [view, setView]                 = useState('dashboard');
@@ -30,29 +31,40 @@ function Dashboard({ token, user, onLogout }) {
   const [burnSymbolId, setBurnSymbolId] = useState('');
   const [burnQty, setBurnQty]           = useState('');
 
+  /* -------------- helpers -------------- */
+  // Wrap refreshUser in useCallback to prevent it from changing on every render
+  const refreshUser = useCallback(async () => {
+    try {
+      const resUser     = await fetch('http://localhost:5000/api/user/me',   { headers:{ Authorization:'Bearer '+token }});
+      const resMyOrders = await fetch('http://localhost:5000/api/orders/my', { headers:{ Authorization:'Bearer '+token }});
+      const profile = await resUser.json();
+      const orders  = await resMyOrders.json();
+      if (profile.user)  setUserData(profile.user);
+      if (orders.orders) setUserOrders(orders.orders);
+    } catch (err) { console.error('refresh fail', err); }
+  }, [token, setUserData, setUserOrders]); // Dependencies for useCallback
+
+
   /* ------------ initial load ------------ */
   useEffect(() => {
     const initData = async () => {
       try {
         const resSymbols  = await fetch('http://localhost:5000/api/symbols',   { headers:{ Authorization:'Bearer '+token }});
-        const resUser     = await fetch('http://localhost:5000/api/user/me',   { headers:{ Authorization:'Bearer '+token }});
-        const resMyOrders = await fetch('http://localhost:5000/api/orders/my', { headers:{ Authorization:'Bearer '+token }});
+        // Call refreshUser for initial load of user-specific data
+        await refreshUser();
 
         const symPayload  = await resSymbols.json();
         const symList     = symPayload.symbols || symPayload; // handle {symbols:[...]} or raw []
-        const profile     = await resUser.json();
-        const myOrders    = await resMyOrders.json();
 
         if (symList.length) {
           setSymbols(symList);
           setCurrentSymbolId((prev) => prev || String(symList[0].id));
         }
-        if (profile.user)    setUserData(profile.user);
-        if (myOrders.orders) setUserOrders(myOrders.orders);
+        // No need to set userData and userOrders here, refreshUser handles it
       } catch (err) { console.error('init data fail', err); }
     };
     initData();
-  }, [token]);
+  }, [token, refreshUser]); // Added refreshUser to dependencies
 
   /* ------------ live polling ------------ */
   useEffect(() => {
@@ -71,51 +83,23 @@ function Dashboard({ token, user, onLogout }) {
         setSellOrders(bookData.sellOrders || []);
         setLastPrice(bookData.lastPrice);
         setPriceDirection(bookData.priceDirection || 'same');
-        setTrades(tradesData.trades || []);
+        setTrades(tradesData.trades || []); // This line will now correctly update the trades state
 
         // push latest price into symbols array so other components can see it
         setSymbols(prev => prev.map(sym =>
           sym.id === Number(currentSymbolId) ? { ...sym, last_price: bookData.lastPrice } : sym
         ));
+
+        // CRUCIAL CHANGE: Call refreshUser to update cash, positions, and open orders
+        await refreshUser();
+
       } catch (err) { console.error('poll fail', err); }
     };
 
-    fetchMarket();
-    const id = setInterval(fetchMarket, 5_000);
+    fetchMarket(); // Initial fetch when currentSymbolId or token changes
+    const id = setInterval(fetchMarket, 5_000); // Poll every 5 seconds
     return () => { ignore = true; clearInterval(id); };
-  }, [currentSymbolId, token]);
-
-  /* -------------- helpers -------------- */
-  const refreshUser = async () => {
-    try {
-      const resUser     = await fetch('http://localhost:5000/api/user/me',   { headers:{ Authorization:'Bearer '+token }});
-      const resMyOrders = await fetch('http://localhost:5000/api/orders/my', { headers:{ Authorization:'Bearer '+token }});
-      const profile = await resUser.json();
-      const orders  = await resMyOrders.json();
-      if (profile.user)  setUserData(profile.user);
-      if (orders.orders) setUserOrders(orders.orders);
-    } catch (err) { console.error('refresh fail', err); }
-  };
-
-  const handleDeleteAccount = async () => {
-    if (!window.confirm('This will permanently delete your account and all associated data. Are you sure?')) return;
-    try {
-      const res = await fetch('http://localhost:5000/api/user/me', {
-        method: 'DELETE',
-        headers: { Authorization: 'Bearer ' + token }
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        alert(data.message || 'Failed to delete account');
-        return;
-      }
-      alert('Your account has been deleted.');
-      onLogout();
-    } catch (err) {
-      console.error('Account deletion failed', err);
-      alert('Server error trying to delete account.');
-    }
-  };
+  }, [currentSymbolId, token, refreshUser, setSymbols]); // Added refreshUser and setSymbols to dependency array
 
   /* ---------- admin actions ---------- */
   const handleAddSymbol = async (e) => {
@@ -162,7 +146,7 @@ function Dashboard({ token, user, onLogout }) {
       const data=await res.json();
       alert(data.message||'Mint done');
       setIssueQty('');
-      refreshUser();
+      refreshUser(); // Keep this call as it's an action-driven update
     } catch (err) { console.error('issue fail', err); }
   };
 
@@ -178,7 +162,7 @@ function Dashboard({ token, user, onLogout }) {
       const data=await res.json();
       alert(data.message||'Burn done');
       setBurnQty('');
-      refreshUser();
+      refreshUser(); // Keep this call as it's an action-driven update
     } catch (err) { console.error('burn fail', err); }
   };
 
@@ -188,8 +172,28 @@ function Dashboard({ token, user, onLogout }) {
       const res  = await fetch(`http://localhost:5000/api/orders/${id}`, { method:'DELETE', headers:{ Authorization:'Bearer '+token }});
       const data = await res.json();
       if (!res.ok) { alert(data.message||'cancel fail'); return; }
-      refreshUser();
+      refreshUser(); // Keep this call as it's an action-driven update
     } catch (err) { console.error('cancel fail', err); }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (!window.confirm('This will permanently delete your account and all associated data. Are you sure?')) return;
+    try {
+      const res = await fetch('http://localhost:5000/api/user/me', {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer ' + token }
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.message || 'Failed to delete account');
+        return;
+      }
+      alert('Your account has been deleted.');
+      onLogout();
+    } catch (err) {
+      console.error('Account deletion failed', err);
+      alert('Server error trying to delete account.');
+    }
   };
 
   /* ---------------- render ---------------- */
@@ -207,14 +211,14 @@ function Dashboard({ token, user, onLogout }) {
         <header className="flex justify-between items-center">
           <div>
             <strong>Welcome, {userData.username}</strong> ({userData.role})<br/>
-            Cash&nbsp;Balance:&nbsp;${Number(userData.cash_balance||0).toFixed(2)}
+            Cash Balance: ${Number(userData.cash_balance||0).toFixed(2)}
           </div>
           <div className="flex gap-2">
             <Link to={`/u/${userData.username}/assessment`}>
               <button className="btn-lite">Risk Assessment</button>
             </Link>
-            <button className="btn-lite" onClick={() => setView('changePass')}>Change PW</button>
-            <button className="btn-lite" onClick={handleDeleteAccount}>Delete Account</button>
+            <button className="btn-lite" onClick={() => setView('changePass')}>Change PW</button>
+            <button className="btn-lite" onClick={handleDeleteAccount}>Delete Account</button>
             <button className="btn-lite" onClick={onLogout}>Logout</button>
           </div>
         </header>
@@ -224,7 +228,7 @@ function Dashboard({ token, user, onLogout }) {
         {/* ----- symbol picker ----- */}
         <section className="flex flex-wrap items-center gap-4">
           <label>
-            Select Symbol:&nbsp;
+            Select Symbol: 
             <select
               value={currentSymbolId}
               onChange={e=> setCurrentSymbolId(e.target.value)}
@@ -237,7 +241,7 @@ function Dashboard({ token, user, onLogout }) {
 
           {lastPrice !== null && (
             <span>
-              Last&nbsp;Price:&nbsp;
+              Last Price: 
               <span className={
                 priceDirection==='up'   ? 'price-up' :
                 priceDirection==='down' ? 'price-down' : ''
@@ -261,7 +265,7 @@ function Dashboard({ token, user, onLogout }) {
                   to={`/u/${userData.username}/symbol/${currentSym.id}/recent_trade`}
                   style={{ color:'#818cf8', fontSize:'0.85rem' }}
                 >
-                  View Recent Trades →
+                  View Recent Trades →
                 </Link>
               )}
             </div>
@@ -299,7 +303,7 @@ function Dashboard({ token, user, onLogout }) {
               {userOrders.length
                 ? <ul>{userOrders.map(o=>(
                     <li key={o.id} className="flex items-center gap-3">
-                      {o.symbol}&nbsp;–&nbsp;{o.side.toUpperCase()} {o.quantity} @ ${o.price}
+                      {o.symbol} – {o.side.toUpperCase()} {o.quantity} @ ${o.price}
                       <button
                         className="btn-lite"
                         style={{backgroundColor:'#e64646'}}
@@ -352,7 +356,7 @@ function Dashboard({ token, user, onLogout }) {
                     {userData.positions?.filter(p=>p.quantity>0 && symbols.find(s=>s.id===p.symbol_id))
                       .map(p=>(
                         <option key={p.symbol_id} value={p.symbol_id}>
-                          {p.symbol} (own {p.quantity})
+                          {symbols.find(s=>s.id===p.symbol_id)?.symbol} (own {p.quantity})
                         </option>
                     ))}
                   </select>

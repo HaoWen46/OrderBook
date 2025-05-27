@@ -11,8 +11,8 @@
   "description": "",
   "dependencies": {
     "better-sqlite3": "^11.9.1",
-    "build": "^0.1.4",
     "cors": "^2.8.5",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "node-seal": "^5.1.6"
   }
 }
